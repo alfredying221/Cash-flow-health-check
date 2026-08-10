@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from io import BytesIO
 from math import isfinite
@@ -130,6 +131,20 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     if uploaded_file.name.lower().endswith(".csv"):
         return pd.read_csv(uploaded_file)
     return pd.read_excel(uploaded_file, engine="openpyxl")
+
+
+def uploaded_file_signature(uploaded_file) -> str:
+    return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+
+
+def initialize_forecast_assumptions(dataset_signature: str, historical_cogs_percentage: float) -> None:
+    if st.session_state.get("forecast_dataset_signature") == dataset_signature:
+        return
+    st.session_state["forecast_dataset_signature"] = dataset_signature
+    st.session_state["forecast_revenue_growth_pct"] = 0.0
+    st.session_state["forecast_cogs_pct"] = historical_cogs_percentage * 100
+    st.session_state["forecast_payroll_growth_pct"] = 0.0
+    st.session_state["forecast_other_opex_growth_pct"] = 0.0
 
 
 def build_input_template() -> bytes:
@@ -342,6 +357,7 @@ def build_scenario_from_base(
 def summarize_metrics(financials: pd.DataFrame) -> dict[str, float]:
     latest = financials.iloc[-1]
     total_revenue = float(financials["Revenue"].sum())
+    total_cogs = float(financials["COGS"].sum())
     total_operating_profit = float(financials["Operating Profit"].sum())
     latest_revenue = float(latest["Revenue"])
     break_even_revenue = float(latest["Break-even Revenue"])
@@ -353,6 +369,7 @@ def summarize_metrics(financials: pd.DataFrame) -> dict[str, float]:
         "gross_margin": float(financials["Gross Profit"].sum() / total_revenue)
         if total_revenue != 0
         else 0.0,
+        "cogs_percentage": safe_divide(total_cogs, total_revenue),
         "operating_profit": total_operating_profit,
         "operating_margin": safe_divide(total_operating_profit, total_revenue),
         "latest_revenue": latest_revenue,
@@ -939,6 +956,9 @@ if uploaded is None:
     st.info("Upload your completed financial data file to generate your Cash Flow Health Check.")
     st.stop()
 
+dataset_signature = uploaded_file_signature(uploaded)
+uploaded.seek(0)
+
 try:
     raw_df = read_uploaded_file(uploaded)
 except Exception as exc:
@@ -955,6 +975,7 @@ if validation_errors:
 history = calculate_financials(prepared_df, opening_cash)
 metrics = summarize_metrics(history)
 score, score_label, score_breakdown = score_cash_health(history, metrics)
+initialize_forecast_assumptions(dataset_signature, metrics["cogs_percentage"])
 
 st.subheader("Dashboard")
 st.caption(
@@ -1042,15 +1063,40 @@ with chart_cols[2]:
     st.plotly_chart(style_chart(fig), use_container_width=True)
 
 st.subheader("12-month Forecast")
+st.caption(
+    "Base Case assumes current business economics broadly continue, with no default monthly revenue growth or expense growth."
+)
 assumption_cols = st.columns(4)
 with assumption_cols[0]:
-    revenue_growth = st.number_input("Monthly revenue growth", value=3.0, step=0.5, format="%.2f") / 100
+    revenue_growth = st.number_input(
+        "Monthly revenue growth",
+        step=0.5,
+        format="%.2f",
+        key="forecast_revenue_growth_pct",
+    ) / 100
 with assumption_cols[1]:
-    cogs_percentage = st.number_input("COGS percentage", value=40.0, min_value=0.0, max_value=100.0, step=1.0) / 100
+    cogs_percentage = st.number_input(
+        "COGS percentage",
+        min_value=0.0,
+        max_value=100.0,
+        step=1.0,
+        format="%.2f",
+        key="forecast_cogs_pct",
+    ) / 100
 with assumption_cols[2]:
-    payroll_growth = st.number_input("Payroll growth", value=1.0, step=0.5, format="%.2f") / 100
+    payroll_growth = st.number_input(
+        "Payroll growth",
+        step=0.5,
+        format="%.2f",
+        key="forecast_payroll_growth_pct",
+    ) / 100
 with assumption_cols[3]:
-    other_opex_growth = st.number_input("Other operating expense growth", value=1.0, step=0.5, format="%.2f") / 100
+    other_opex_growth = st.number_input(
+        "Other operating expense growth",
+        step=0.5,
+        format="%.2f",
+        key="forecast_other_opex_growth_pct",
+    ) / 100
 
 forecast = build_forecast(
     history,

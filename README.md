@@ -46,6 +46,8 @@ Estimated cash movement currently uses operating profit as a simplified proxy fo
 
 Scenario analysis uses the 12-month Base Case forecast as the central forecast. Downside and Upside cases apply a non-compounded monthly revenue adjustment to each Base Case forecast month, then recalculate COGS, operating profit, and estimated ending cash balance.
 
+Base Case forecast defaults assume current operating economics broadly continue: monthly revenue growth defaults to 0.0%, COGS percentage defaults to historical weighted COGS percentage, payroll growth defaults to 0.0%, and other operating expense growth defaults to 0.0%.
+
 Cash runway displays as `Cash Generating` when forecast or historical estimated cash movement is consistently positive, `24+ months` when runway exceeds 24 months, or a one-decimal month value otherwise.
 
 The Cash Flow Health Score uses these component weights:
