@@ -1,16 +1,25 @@
-.venv/
-venv/
-__pycache__/
-*.pyc
+.git
+.gitignore
+.gitattributes
+
+.venv
+venv
+__pycache__
+*.py[cod]
 *.pyo
 *.pyd
-.pytest_cache/
-.streamlit/secrets.toml
-.DS_Store
-Thumbs.db
+.pytest_cache
 
-# Local helpers and internal QA datasets
+.streamlit/secrets.toml
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.json
+
 run_app.ps1
+
 sample_data.csv
 healthy_business.csv
 watch_business.csv
@@ -21,10 +30,16 @@ at_risk_food_business.csv
 healthy_market_vendor.csv
 watch_market_vendor.csv
 
-# Generated reports and templates
 cash_flow_summary_*.pdf
 cash_flow_forecast_*.xlsx
 cash_flow_health_check_input_template*.xlsx
 business_financial_health_report_*.pdf
 business_financial_forecast_*.xlsx
 business_financial_health_check_input_template*.xlsx
+
+*.log
+*.tmp
+*.temp
+*.bak
+screenshots
+screenshots/
