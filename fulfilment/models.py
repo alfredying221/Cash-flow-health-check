@@ -22,6 +22,7 @@ ValidationStatus = Literal["NOT_VALIDATED", "VALIDATED", "FAILED"]
 AnalysisStatus = Literal["NOT_STARTED", "PROCESSING", "COMPLETED", "FAILED"]
 ResultStatus = Literal["NOT_READY", "READY"]
 ExpertReviewStatus = Literal["NOT_REQUIRED", "PENDING_REVIEW", "IN_REVIEW", "APPROVED", "RELEASED"]
+CustomerSessionPurpose = Literal["upload", "result"]
 
 
 def utc_now() -> datetime:
@@ -118,6 +119,19 @@ class StripeEventRecord:
     processed_at: datetime | None = None
     order_id: str | None = None
     error_code: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CustomerSession:
+    session_hash: str
+    order_id: str
+    purpose: CustomerSessionPurpose
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

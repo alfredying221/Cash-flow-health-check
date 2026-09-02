@@ -135,4 +135,4 @@ def validate_token(
 
 def build_secure_upload_url(base_url: str, raw_token: str) -> str:
     clean_base = base_url.rstrip("/")
-    return f"{clean_base}/upload?t={raw_token}"
+    return f"{clean_base}/access#{raw_token}"

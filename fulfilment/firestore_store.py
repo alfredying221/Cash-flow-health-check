@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .models import Order, StripeEventRecord
+from .models import CustomerSession, Order, StripeEventRecord
 from .orders import OrderStore
 
 
@@ -291,3 +291,16 @@ class FirestoreOrderStore(OrderStore):
 
         transaction = self.client.transaction()
         return firestore.transactional(claim)(transaction)
+
+    def save_customer_session(self, session: CustomerSession) -> CustomerSession:
+        self.client.collection("customer_sessions").document(session.session_hash).set(session.to_dict(), merge=True)
+        return session
+
+    def get_customer_session(self, session_hash: str) -> CustomerSession | None:
+        snapshot = self.client.collection("customer_sessions").document(session_hash).get()
+        if not snapshot.exists:
+            return None
+        return CustomerSession(**snapshot.to_dict())
+
+    def delete_customer_session(self, session_hash: str) -> None:
+        self.client.collection("customer_sessions").document(session_hash).delete()

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from html import escape
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import Settings
+from .customer_sessions import (
+    CUSTOMER_SESSION_COOKIE,
+    CustomerSessionError,
+    exchange_customer_token,
+    validate_customer_session,
+)
 from .email_service import EmailDeliveryError, ResendEmailProvider, UnconfiguredEmailProvider
 from .firestore_store import FirestoreOrderStore
 from .fulfilment_service import OrderFulfilmentService
@@ -29,13 +36,13 @@ from .result_delivery import (
     is_expert_review_blocked,
     is_result_releasable,
     load_authorized_artifact,
+    load_authorized_artifact_for_order,
     mark_result_accessed,
     result_product_label,
-    validate_result_token,
 )
 from .stripe_webhook import StripeSignatureError, construct_event
 from .storage import GoogleCloudUploadStorage, InMemoryUploadStorage, UploadStorageError
-from .tokens import TokenConfigurationError, TokenValidationError, validate_token
+from .tokens import TokenConfigurationError, TokenValidationError
 from .upload_intake import (
     IntakeError,
     InvalidBusinessTypeError,
@@ -104,31 +111,74 @@ def generic_operator_denial_response() -> HTMLResponse:
     return secure_html_response(render_page("<p>Operator access is not available.</p>"), status_code=403)
 
 
+@app.get("/access")
+def access_bootstrap() -> Response:
+    nonce = secrets.token_urlsafe(16)
+    body = render_access_page(nonce)
+    headers = UPLOAD_SECURITY_HEADERS.copy()
+    headers["Content-Security-Policy"] = (
+        f"default-src 'none'; script-src 'nonce-{nonce}'; connect-src 'self'; "
+        "style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    )
+    return HTMLResponse(body, headers=headers)
+
+
+@app.post("/session/exchange")
+async def session_exchange(request: Request) -> Response:
+    settings = Settings.from_env()
+    store = FirestoreOrderStore(project=settings.google_cloud_project)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    token = payload.get("token") if isinstance(payload, dict) else None
+    try:
+        result = exchange_customer_token(
+            token,
+            store,
+            derivation_secret=settings.token_derivation_secret,
+            session_minutes=settings.customer_session_minutes,
+        )
+    except CustomerSessionError:
+        return JSONResponse({"status": "denied"}, status_code=403, headers=UPLOAD_SECURITY_HEADERS.copy())
+
+    response = JSONResponse({"status": "ok", "next": result.next_path}, headers=UPLOAD_SECURITY_HEADERS.copy())
+    response.set_cookie(
+        CUSTOMER_SESSION_COOKIE,
+        result.raw_session_id,
+        max_age=settings.customer_session_minutes * 60,
+        expires=settings.customer_session_minutes * 60,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+def get_session_cookie(request: Request) -> str | None:
+    return getattr(request, "cookies", {}).get(CUSTOMER_SESSION_COOKIE)
+
+
 @app.get("/upload")
 def upload_form(request: Request) -> Response:
     settings = Settings.from_env()
     store = FirestoreOrderStore(project=settings.google_cloud_project)
-    token = request.query_params.get("t")
     try:
-        order = validate_token(token, store, derivation_secret=settings.token_derivation_secret)
+        _, order = validate_customer_session(get_session_cookie(request), "upload", store)
         ensure_upload_allowed(order)
-    except (TokenConfigurationError, TokenValidationError, UploadNotAllowedError):
+    except (CustomerSessionError, UploadNotAllowedError):
         return generic_denial_response()
-    return secure_html_response(render_upload_form(token or ""))
+    return secure_html_response(render_upload_form())
 
 
 @app.get("/result")
 def result_page(request: Request) -> Response:
     settings = Settings.from_env()
     store = FirestoreOrderStore(project=settings.google_cloud_project)
-    token = request.query_params.get("t")
     try:
-        order = validate_result_token(token, store, derivation_secret=settings.token_derivation_secret)
-    except ResultTokenExpiredError:
-        return generic_result_denial_response(
-            "This secure SENALO result link has expired. Please contact hello@senalo.com.au for assistance."
-        )
-    except (TokenConfigurationError, TokenValidationError):
+        _, order = validate_customer_session(get_session_cookie(request), "result", store)
+    except CustomerSessionError:
         return generic_result_denial_response()
 
     if is_expert_review_blocked(order):
@@ -141,7 +191,7 @@ def result_page(request: Request) -> Response:
         return generic_result_denial_response()
 
     mark_result_accessed(order, store)
-    return secure_html_response(render_result_page(token or "", result_product_label(order)))
+    return secure_html_response(render_result_page(result_product_label(order)))
 
 
 @app.get("/download/pdf")
@@ -303,20 +353,15 @@ def operator_review_download(request: Request, order_id: str, artifact_type: str
 def download_artifact(request: Request, artifact_type: str) -> Response:
     settings = Settings.from_env()
     store = FirestoreOrderStore(project=settings.google_cloud_project)
-    token = request.query_params.get("t")
     try:
-        _, content, content_type, filename = load_authorized_artifact(
-            raw_token=token,
+        _, order = validate_customer_session(get_session_cookie(request), "result", store)
+        _, content, content_type, filename = load_authorized_artifact_for_order(
+            order=order,
             artifact_type=artifact_type,
             store=store,
             storage=get_upload_storage(settings),
-            derivation_secret=settings.token_derivation_secret,
         )
-    except ResultTokenExpiredError:
-        return generic_result_denial_response(
-            "This secure SENALO result link has expired. Please contact hello@senalo.com.au for assistance."
-        )
-    except (TokenConfigurationError, TokenValidationError, ResultNotReleasableError):
+    except (CustomerSessionError, ResultNotReleasableError):
         return generic_result_denial_response()
 
     return Response(
@@ -332,7 +377,7 @@ def download_artifact(request: Request, artifact_type: str) -> Response:
 @app.post("/upload")
 async def upload_submit(
     request: Request,
-    t: str = Form(...),
+    t: str | None = Form(None),
     business_type: str = Form(...),
     opening_cash: str = Form(...),
     financial_file: UploadFile = File(...),
@@ -341,7 +386,7 @@ async def upload_submit(
     settings = Settings.from_env()
     store = FirestoreOrderStore(project=settings.google_cloud_project)
     try:
-        order = validate_token(t, store, derivation_secret=settings.token_derivation_secret)
+        _, order = validate_customer_session(get_session_cookie(request), "upload", store)
         content = await financial_file.read(settings.max_upload_bytes + 1)
         result = submit_upload(
             order=order,
@@ -353,24 +398,24 @@ async def upload_submit(
             content=content,
             max_upload_bytes=settings.max_upload_bytes,
         )
-    except (TokenConfigurationError, TokenValidationError, UploadNotAllowedError):
+    except (CustomerSessionError, UploadNotAllowedError):
         return generic_denial_response()
     except InvalidBusinessTypeError as exc:
-        return secure_html_response(render_upload_form(t, [str(exc)]), status_code=400)
+        return secure_html_response(render_upload_form([str(exc)]), status_code=400)
     except InvalidOpeningCashError as exc:
-        return secure_html_response(render_upload_form(t, [str(exc)]), status_code=400)
+        return secure_html_response(render_upload_form([str(exc)]), status_code=400)
     except ValidationFailedError as exc:
         logger.info(
             "upload_validation_failed",
             extra={"error_code": exc.error_code, "duration_ms": round((time.perf_counter() - started) * 1000, 2)},
         )
-        return secure_html_response(render_upload_form(t, exc.errors), status_code=400)
+        return secure_html_response(render_upload_form(exc.errors), status_code=400)
     except (IntakeError, UploadStorageError) as exc:
         logger.warning(
             "upload_failed",
             extra={"error_code": getattr(exc, "error_code", str(exc)), "duration_ms": round((time.perf_counter() - started) * 1000, 2)},
         )
-        return secure_html_response(render_upload_form(t, ["The upload could not be completed. Please try again."]), status_code=400)
+        return secure_html_response(render_upload_form(["The upload could not be completed. Please try again."]), status_code=400)
 
     logger.info(
         "upload_validated",
@@ -392,7 +437,58 @@ async def upload_submit(
     )
 
 
-def render_upload_form(token: str, errors: list[str] | None = None) -> str:
+def render_access_page(nonce: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SENALO Secure Access</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; }}
+    main {{ max-width: 680px; margin: 0 auto; padding: 32px 18px; }}
+    .brand {{ font-weight: 800; letter-spacing: 0.04em; margin-bottom: 6px; }}
+    .panel {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 24px; box-shadow: 0 1px 2px rgba(15,23,42,.05); }}
+    .note {{ color: #475569; }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">SENALO</div>
+    <div class="panel">
+      <h1>Secure Access</h1>
+      <p class="note" id="status">Preparing your secure session...</p>
+    </div>
+  </main>
+  <script nonce="{escape(nonce)}">
+    (async function () {{
+      const raw = window.location.hash || "";
+      const token = raw.startsWith("#") ? raw.slice(1) : "";
+      window.history.replaceState(null, "", "/access");
+      if (!token) {{
+        document.getElementById("status").textContent = "This secure SENALO link is invalid or has expired. Please contact hello@senalo.com.au for assistance.";
+        return;
+      }}
+      try {{
+        const response = await fetch("/session/exchange", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          credentials: "same-origin",
+          body: JSON.stringify({{ token }})
+        }});
+        if (!response.ok) throw new Error("denied");
+        const payload = await response.json();
+        window.location.replace(payload.next || "/upload");
+      }} catch (error) {{
+        document.getElementById("status").textContent = "This secure SENALO link is invalid or has expired. Please contact hello@senalo.com.au for assistance.";
+      }}
+    }})();
+  </script>
+</body>
+</html>"""
+
+
+def render_upload_form(errors: list[str] | None = None) -> str:
     options = "".join(
         f'<option value="{escape(value)}">{escape(value)}</option>'
         for value in [
@@ -409,7 +505,6 @@ def render_upload_form(token: str, errors: list[str] | None = None) -> str:
     form = f"""
         {error_html}
         <form method="post" action="/upload" enctype="multipart/form-data">
-            <input type="hidden" name="t" value="{escape(token)}">
             <label>Business Type
                 <select name="business_type" required>{options}</select>
             </label>
@@ -425,7 +520,7 @@ def render_upload_form(token: str, errors: list[str] | None = None) -> str:
     return render_page(form)
 
 
-def render_result_page(token: str, title: str = "SENALO Full Analysis") -> str:
+def render_result_page(title: str = "SENALO Full Analysis") -> str:
     description = (
         "These files contain your final human-reviewed SENALO report and Excel analysis."
         if title == "SENALO Expert Review"
@@ -437,8 +532,8 @@ def render_result_page(token: str, title: str = "SENALO Full Analysis") -> str:
         <p>Your analysis is ready.</p>
         <p>{escape(description)}</p>
         <ul>
-            <li><a href="/download/pdf?t={escape(token)}">Download PDF Report</a></li>
-            <li><a href="/download/excel?t={escape(token)}">Download Excel Analysis</a></li>
+            <li><a href="/download/pdf">Download PDF Report</a></li>
+            <li><a href="/download/excel">Download Excel Analysis</a></li>
         </ul>
         <p>If you need assistance, contact hello@senalo.com.au.</p>
         <p class="note">SENALO<br>See clearly. Decide better.<br>https://senalo.com.au</p>

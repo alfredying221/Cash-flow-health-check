@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 from fulfilment import app as app_module
 from fulfilment.analysis_processor import process_order_analysis
 from fulfilment.config import Settings
+from fulfilment.customer_sessions import CUSTOMER_SESSION_COOKIE, create_customer_session
 from fulfilment.email_service import RecordingEmailProvider
 from fulfilment.fulfilment_service import OrderFulfilmentService
 from fulfilment.operator_review import (
@@ -32,7 +33,7 @@ from fulfilment.result_delivery import (
 from fulfilment.storage import InMemoryUploadStorage
 from fulfilment.upload_intake import submit_upload
 from tests.test_fulfilment_gate2 import event, session
-from tests.test_fulfilment_gate4 import csv_bytes, settings as base_settings, valid_dataframe
+from tests.test_fulfilment_gate4 import csv_bytes, session_request, settings as base_settings, valid_dataframe
 
 
 def settings() -> Settings:
@@ -55,13 +56,21 @@ def settings() -> Settings:
         upload_bucket=source.upload_bucket,
         max_upload_bytes=source.max_upload_bytes,
         operator_auth_token="operator-secret",
+        deployment_role=source.deployment_role,
+        operator_audit_id=source.operator_audit_id,
     )
 
 
 class DummyRequest:
-    def __init__(self, token: str | None = None, headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        token: str | None = None,
+        headers: dict[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
+    ):
         self.query_params = {"t": token} if token is not None else {}
         self.headers = headers or {}
+        self.cookies = cookies or {}
 
 
 def operator_request() -> DummyRequest:
@@ -242,7 +251,7 @@ class Gate7ExpertReviewTests(unittest.TestCase):
         self.assertIn("Historical Analysis", workbook.sheetnames)
         self.assertEqual(len(provider.sent), 1)
         self.assertEqual(provider.sent[0][0].subject, "SENALO Expert Review – Your Review Is Ready")
-        self.assertIn("/result?t=", provider.sent[0][0].body)
+        self.assertIn("/access#", provider.sent[0][0].body)
 
         second = release_expert_review(
             order_id=order.order_id,
@@ -273,7 +282,8 @@ class Gate7ExpertReviewTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: storage
         try:
-            blocked = app_module.result_page(DummyRequest(raw_token))
+            blocked_session = create_customer_session(order, "result", store)
+            blocked = app_module.result_page(DummyRequest(cookies={CUSTOMER_SESSION_COOKIE: blocked_session.raw_session_id}))
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -284,8 +294,9 @@ class Gate7ExpertReviewTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: storage
         try:
-            pending_pdf = app_module.download_pdf(DummyRequest(raw_token))
-            pending_excel = app_module.download_excel(DummyRequest(raw_token))
+            pending_request = session_request(store, order, "result")
+            pending_pdf = app_module.download_pdf(pending_request)
+            pending_excel = app_module.download_excel(pending_request)
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -299,7 +310,7 @@ class Gate7ExpertReviewTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: storage
         try:
-            approved_pdf = app_module.download_pdf(DummyRequest(raw_token))
+            approved_pdf = app_module.download_pdf(session_request(store, approved, "result"))
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -323,9 +334,10 @@ class Gate7ExpertReviewTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: storage
         try:
-            page = app_module.result_page(DummyRequest(result_token))
-            pdf = app_module.download_pdf(DummyRequest(result_token))
-            excel = app_module.download_excel(DummyRequest(result_token))
+            result_request = session_request(store, released, "result")
+            page = app_module.result_page(result_request)
+            pdf = app_module.download_pdf(result_request)
+            excel = app_module.download_excel(result_request)
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -454,9 +466,12 @@ class Gate7ExpertReviewTests(unittest.TestCase):
             source_denied = app_module.operator_review_download(DummyRequest(), order.order_id, "source")
             base_pdf_denied = app_module.operator_review_download(DummyRequest(), order.order_id, "base-pdf")
             base_excel_denied = app_module.operator_review_download(DummyRequest(), order.order_id, "base-excel")
-            customer_source_denied = app_module.operator_review_download(DummyRequest(result_token), order.order_id, "source")
+            result_session = create_customer_session(order, "result", store)
+            customer_source_denied = app_module.operator_review_download(
+                DummyRequest(cookies={CUSTOMER_SESSION_COOKIE: result_session.raw_session_id}), order.order_id, "source"
+            )
             source_ok = app_module.operator_review_download(operator_request(), order.order_id, "source")
-            result_with_operator_credential = app_module.result_page(DummyRequest("operator-secret"))
+            result_with_operator_credential = app_module.result_page(DummyRequest())
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -529,7 +544,7 @@ class Gate7ExpertReviewTests(unittest.TestCase):
         sent = ResultDeliveryService(store, settings(), provider).send_result_ready_email(ready.order_id)
         self.assertEqual(sent.result_email_status, "SENT")
         self.assertEqual(provider.sent[0][0].subject, "SENALO Full Analysis – Your Analysis Is Ready")
-        token = provider.sent[0][0].body.split("/result?t=", 1)[1].splitlines()[0]
+        token = provider.sent[0][0].body.split("/access#", 1)[1].splitlines()[0]
         original_store = app_module.FirestoreOrderStore
         original_settings = app_module.Settings.from_env
         original_storage = app_module.get_upload_storage
@@ -537,8 +552,9 @@ class Gate7ExpertReviewTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: storage
         try:
-            page = app_module.result_page(DummyRequest(token))
-            pdf = app_module.download_pdf(DummyRequest(token))
+            result_request = session_request(store, ready, "result")
+            page = app_module.result_page(result_request)
+            pdf = app_module.download_pdf(result_request)
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings

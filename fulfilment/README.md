@@ -16,21 +16,25 @@ webhook activation, production deployment, or a complex admin system.
 
 - `GET /health`
 - `POST /webhooks/stripe`
-- `GET /upload?t=<opaque_token>`
+- `GET /access#<opaque_token>`
+- `POST /session/exchange`
+- `GET /upload`
 - `POST /upload`
-- `GET /result?t=<opaque_result_token>`
-- `GET /download/pdf?t=<opaque_result_token>`
-- `GET /download/excel?t=<opaque_result_token>`
+- `GET /result`
+- `GET /download/pdf`
+- `GET /download/excel`
 - `GET /operator/reviews`
 - `GET /operator/reviews/{order_id}`
 - `POST /operator/reviews/{order_id}/draft`
 - `POST /operator/reviews/{order_id}/release`
 - `GET /operator/reviews/{order_id}/download/{artifact_type}`
 
-The `/upload` route validates the opaque customer token and then presents a
-single financial-data intake form. The form accepts business type, opening cash,
-and one CSV or XLSX file using the same canonical SENALO validation pipeline as
-the Streamlit app.
+The `/access` route serves a minimal first-party fragment bootstrap page. The
+browser reads the URL fragment, clears it from the address bar, exchanges the
+token through `POST /session/exchange`, and then uses a secure session cookie to
+load `/upload` or `/result`. The `/upload` route presents a single financial-data
+intake form. The form accepts business type, opening cash, and one CSV or XLSX
+file using the same canonical SENALO validation pipeline as the Streamlit app.
 
 ## Required Configuration
 
@@ -54,6 +58,9 @@ configuration. Do not commit real secrets.
 - `SENALO_UPLOAD_BUCKET`
 - `SENALO_MAX_UPLOAD_BYTES`
 - `SENALO_OPERATOR_AUTH_TOKEN`
+- `SENALO_DEPLOYMENT_ROLE`
+- `SENALO_OPERATOR_AUDIT_ID`
+- `SENALO_CUSTOMER_SESSION_MINUTES`
 
 Recommended production sender after DNS is configured:
 
@@ -63,10 +70,10 @@ Recommended production sender after DNS is configured:
 Do not commit real API keys.
 
 `SENALO_OPERATOR_AUTH_TOKEN` is a minimal local/test operator-auth abstraction
-used by Gate 7 operator routes through the `X-SENALO-OPERATOR-TOKEN` header. For
-production, protect operator routes with Cloud Run IAM/IAP or another verified
-operator identity layer before exposing them. Do not rely on a shared header
-token as the final production access-control model.
+used by Gate 7 operator routes through the `X-SENALO-OPERATOR-TOKEN` header.
+Production uses `SENALO_DEPLOYMENT_ROLE`: `public` disables operator routes in
+the public service, and `operator` relies on Cloud Run IAM as the outer access
+boundary while using `SENALO_OPERATOR_AUDIT_ID` only for audit attribution.
 
 The live/test Stripe Price IDs and Product IDs must be supplied by the operator
 before any live webhook is enabled. Payment Link URLs are not used for product
@@ -209,8 +216,16 @@ They do not connect to live Stripe, live Resend, or live Firestore.
 - Reissuing a token is an explicit operation that creates a new seed/version and
   replaces the stored hash, making the old token invalid.
 - Token validation rejects malformed, unknown, expired, and revoked tokens.
-- Customer URLs use `/upload?t=<opaque_token>` and do not include order IDs.
-- `/upload` responses set `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
+- Customer email links use `/access#<opaque_token>` and do not include order IDs.
+  URL fragments are not sent in HTTP requests, so the raw customer token is not
+  present in request URLs or access logs.
+- `/session/exchange` validates the token and creates a short-lived customer
+  session. The browser receives only an `HttpOnly`, `Secure`, `SameSite=Lax`
+  cookie containing a raw session ID; the server stores only its hash.
+- Customer session expiry defaults to 45 minutes via
+  `SENALO_CUSTOMER_SESSION_MINUTES`.
+- `/access`, `/session/exchange`, and customer pages set
+  `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
 
 ## Gate 4 Upload Intake Notes
 
@@ -302,9 +317,9 @@ They do not connect to live Stripe, live Resend, or live Firestore.
   financial values, storage URLs, order IDs, or Stripe IDs.
 - Email retry preserves the same result token and secure result URL. It does not
   regenerate analysis artifacts or reissue tokens.
-- Downloads are backend-proxied through fixed routes:
-  `/download/pdf?t=<token>` and `/download/excel?t=<token>`. No arbitrary object
-  path parameter is accepted and private storage URLs are never exposed.
+- Downloads are backend-proxied through fixed cookie-authorized routes:
+  `/download/pdf` and `/download/excel`. No arbitrary object path parameter is
+  accepted and private storage URLs are never exposed.
 - PDF downloads use fixed filename `SENALO-Full-Analysis.pdf`; Excel downloads
   use fixed filename `SENALO-Full-Analysis.xlsx`.
 - Minimal delivery audit fields track `delivered_at`, `last_download_at`, and
@@ -318,9 +333,11 @@ They do not connect to live Stripe, live Resend, or live Firestore.
   an operator completes the manual review.
 - The operator queue lists only paid, ready `EXPERT_REVIEW` orders. It does not
   list `FULL_ANALYSIS` orders.
-- Operator routes require `X-SENALO-OPERATOR-TOKEN` matching
-  `SENALO_OPERATOR_AUTH_TOKEN`. `X-SENALO-OPERATOR-ID` may be supplied for local
-  audit attribution.
+- In local/test mode, operator routes require `X-SENALO-OPERATOR-TOKEN`
+  matching `SENALO_OPERATOR_AUTH_TOKEN`. `X-SENALO-OPERATOR-ID` may be supplied
+  for local audit attribution. In production operator mode, Cloud Run IAM is the
+  access boundary and `SENALO_OPERATOR_AUDIT_ID` supplies the fixed audit
+  identity when no application-level principal is available.
 - Operators can download the source upload and base PDF/XLSX, save draft
   commentary, and enter 3-5 prioritised management actions.
 - Saving a draft changes `PENDING_REVIEW` to `IN_REVIEW` but does not release

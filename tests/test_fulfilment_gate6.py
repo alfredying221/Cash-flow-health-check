@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from fulfilment import app as app_module
 from fulfilment.analysis_processor import process_order_analysis
+from fulfilment.customer_sessions import create_customer_session, exchange_customer_token
 from fulfilment.email_service import EmailDeliveryError, RecordingEmailProvider
 from fulfilment.fulfilment_service import OrderFulfilmentService
 from fulfilment.orders import InMemoryOrderStore, process_stripe_event
@@ -20,7 +21,7 @@ from fulfilment.storage import InMemoryUploadStorage
 from fulfilment.tokens import TokenValidationError, reproduce_token
 from fulfilment.upload_intake import submit_upload
 from tests.test_fulfilment_gate2 import event, session
-from tests.test_fulfilment_gate4 import DummyRequest, csv_bytes, settings, valid_dataframe
+from tests.test_fulfilment_gate4 import DummyRequest, csv_bytes, session_request, settings, valid_dataframe
 
 
 class FailOnceEmailProvider(RecordingEmailProvider):
@@ -45,7 +46,7 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         provider = provider or RecordingEmailProvider()
         service = ResultDeliveryService(store, settings(), provider)
         sent = service.send_result_ready_email(order.order_id)
-        token = provider.sent[0][0].body.split("/result?t=", 1)[1].splitlines()[0] if provider.sent else None
+        token = provider.sent[0][0].body.split("/access#", 1)[1].splitlines()[0] if provider.sent else None
         return sent, token, provider
 
     def test_full_analysis_result_page_access_and_safe_headers(self) -> None:
@@ -56,8 +57,8 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.FirestoreOrderStore = lambda project=None: store
         app_module.Settings.from_env = settings
         try:
-            response = app_module.result_page(DummyRequest(result_token))
-            invalid = app_module.result_page(DummyRequest("wrong_token_value_that_is_long_enough"))
+            response = app_module.result_page(session_request(store, order, "result"))
+            invalid = app_module.result_page(DummyRequest())
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -93,7 +94,8 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.FirestoreOrderStore = lambda project=None: store
         app_module.Settings.from_env = settings
         try:
-            not_ready_page = app_module.result_page(DummyRequest(not_ready_token))
+            not_ready_session = create_customer_session(order, "result", store)
+            not_ready_page = app_module.result_page(DummyRequest(cookies={"senalo_customer_session": not_ready_session.raw_session_id}))
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -105,15 +107,8 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         expired = store.save_order(replace(sent, result_token_expires_at=sent.result_token_created_at - timedelta(seconds=1)))
         with self.assertRaises(Exception):
             validate_result_token(token, store, derivation_secret=settings().token_derivation_secret)
-        app_module.FirestoreOrderStore = lambda project=None: store
-        app_module.Settings.from_env = settings
-        try:
-            expired_page = app_module.result_page(DummyRequest(token))
-        finally:
-            app_module.FirestoreOrderStore = original_store
-            app_module.Settings.from_env = original_settings
-        self.assertEqual(expired_page.status_code, 403)
-        self.assertEqual(expired_page.headers["cache-control"], "no-store")
+        with self.assertRaises(Exception):
+            exchange_customer_token(token, store, derivation_secret=settings().token_derivation_secret)
         updated, token = reissue_result_token(
             expired.order_id,
             store,
@@ -138,7 +133,8 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.FirestoreOrderStore = lambda project=None: store
         app_module.Settings.from_env = settings
         try:
-            upload_response = app_module.upload_form(DummyRequest(result_token))
+            result_session = create_customer_session(processed.order, "result", store)
+            upload_response = app_module.upload_form(DummyRequest(cookies={"senalo_customer_session": result_session.raw_session_id}))
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -154,8 +150,9 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: storage
         try:
-            pdf = app_module.download_pdf(DummyRequest(result_token))
-            excel = app_module.download_excel(DummyRequest(result_token))
+            request = session_request(store, order, "result")
+            pdf = app_module.download_pdf(request)
+            excel = app_module.download_excel(request)
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -184,8 +181,9 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: storage
         try:
-            response = app_module.download_pdf(DummyRequest(result_token))
-            arbitrary = app_module.download_artifact(DummyRequest(result_token), "path=uploads/something")
+            request = session_request(store, order, "result")
+            response = app_module.download_pdf(request)
+            arbitrary = app_module.download_artifact(request, "path=uploads/something")
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -203,7 +201,7 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         self.assertEqual(second.result_email_status, "SENT")
         self.assertEqual(len(provider.sent), 1)
         self.assertEqual(provider.sent[0][1], f"result-ready/{order.order_id}")
-        original_token = provider.sent[0][0].body.split("/result?t=", 1)[1].splitlines()[0]
+        original_token = provider.sent[0][0].body.split("/access#", 1)[1].splitlines()[0]
         self.assertEqual(reproduce_result_token(sent, settings().token_derivation_secret), original_token)
 
         provider = FailOnceEmailProvider()
@@ -213,7 +211,7 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         failed = ResultDeliveryService(store, settings(), provider).send_result_ready_email(order.order_id)
         failed_token = reproduce_result_token(failed, settings().token_derivation_secret)
         retry = ResultDeliveryService(store, settings(), provider).send_result_ready_email(order.order_id)
-        retry_token = provider.sent[0][0].body.split("/result?t=", 1)[1].splitlines()[0]
+        retry_token = provider.sent[0][0].body.split("/access#", 1)[1].splitlines()[0]
         self.assertEqual(failed.result_email_status, "FAILED")
         self.assertEqual(retry.result_email_status, "SENT")
         self.assertEqual(failed_token, retry_token)
@@ -240,7 +238,7 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.FirestoreOrderStore = lambda project=None: store
         app_module.Settings.from_env = settings
         try:
-            app_module.result_page(DummyRequest(result_token))
+            app_module.result_page(session_request(store, order, "result"))
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -264,9 +262,10 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda active_settings: expert_storage
         try:
-            page = app_module.result_page(DummyRequest(expert_token))
-            pdf = app_module.download_pdf(DummyRequest(expert_token))
-            excel = app_module.download_excel(DummyRequest(expert_token))
+            request = session_request(expert_store, expert_order, "result")
+            page = app_module.result_page(request)
+            pdf = app_module.download_pdf(request)
+            excel = app_module.download_excel(request)
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -282,7 +281,7 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         provider = RecordingEmailProvider()
         with self.assertLogs("senalo.fulfilment", level=logging.INFO) as captured:
             sent = ResultDeliveryService(store, settings(), provider).send_result_ready_email(order.order_id)
-        token = provider.sent[0][0].body.split("/result?t=", 1)[1].splitlines()[0]
+        token = provider.sent[0][0].body.split("/access#", 1)[1].splitlines()[0]
         original_store = app_module.FirestoreOrderStore
         original_settings = app_module.Settings.from_env
         original_storage = app_module.get_upload_storage
@@ -291,7 +290,7 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         app_module.get_upload_storage = lambda active_settings: storage
         try:
             with self.assertLogs("senalo.fulfilment", level=logging.INFO) as download_logs:
-                app_module.download_pdf(DummyRequest(token))
+                app_module.download_pdf(session_request(store, order, "result"))
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings

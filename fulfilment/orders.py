@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from .config import ProductConfig, Settings
-from .models import Order, StripeEventRecord, utc_now
+from .models import CustomerSession, Order, StripeEventRecord, utc_now
 
 
 class FulfilmentError(Exception):
@@ -77,12 +77,22 @@ class OrderStore(Protocol):
     def claim_expert_review_release(self, order_id: str, released_at: datetime) -> Order | None:
         ...
 
+    def save_customer_session(self, session: CustomerSession) -> CustomerSession:
+        ...
+
+    def get_customer_session(self, session_hash: str) -> CustomerSession | None:
+        ...
+
+    def delete_customer_session(self, session_hash: str) -> None:
+        ...
+
 
 class InMemoryOrderStore:
     def __init__(self) -> None:
         self.events: dict[str, StripeEventRecord] = {}
         self.orders: dict[str, Order] = {}
         self.checkout_index: dict[str, str] = {}
+        self.customer_sessions: dict[str, CustomerSession] = {}
 
     def reserve_event(self, event_id: str, event_type: str, received_at: datetime) -> str:
         existing = self.events.get(event_id)
@@ -296,6 +306,16 @@ class InMemoryOrderStore:
         )
         self.orders[order_id] = claimed
         return claimed
+
+    def save_customer_session(self, session: CustomerSession) -> CustomerSession:
+        self.customer_sessions[session.session_hash] = session
+        return session
+
+    def get_customer_session(self, session_hash: str) -> CustomerSession | None:
+        return self.customer_sessions.get(session_hash)
+
+    def delete_customer_session(self, session_hash: str) -> None:
+        self.customer_sessions.pop(session_hash, None)
 
 
 def make_order_id(checkout_session_id: str) -> str:

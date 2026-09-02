@@ -62,6 +62,10 @@ class FinalArtifactSet:
 
 
 def authenticate_operator(request: Request, settings: Settings) -> OperatorIdentity:
+    if settings.deployment_role == "public":
+        raise OperatorAuthError(OPERATOR_ACCESS_DENIED)
+    if settings.deployment_role == "operator":
+        return OperatorIdentity(operator_id=settings.operator_audit_id[:80])
     configured_token = settings.operator_auth_token
     supplied_token = request.headers.get("x-senalo-operator-token")
     if not configured_token or not supplied_token or supplied_token != configured_token:

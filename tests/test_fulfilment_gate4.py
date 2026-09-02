@@ -12,6 +12,7 @@ from starlette.datastructures import UploadFile
 
 from fulfilment import app as app_module
 from fulfilment.config import Settings
+from fulfilment.customer_sessions import CUSTOMER_SESSION_COOKIE, create_customer_session, exchange_customer_token
 from fulfilment.email_service import RecordingEmailProvider
 from fulfilment.fulfilment_service import OrderFulfilmentService
 from fulfilment.models import Order
@@ -113,8 +114,13 @@ def paid_order_and_token(status: str = "AWAITING_UPLOAD") -> tuple[InMemoryOrder
     order = next(iter(store.orders.values()))
     if status != order.fulfilment_status:
         order = store.save_order(replace(order, fulfilment_status=status))
-    token = email_provider.sent[0][0].body.split("/upload?t=", 1)[1].splitlines()[0]
+    token = email_provider.sent[0][0].body.split("/access#", 1)[1].splitlines()[0]
     return store, order, token
+
+
+def session_request(store: InMemoryOrderStore, order: Order, purpose: str = "upload") -> "DummyRequest":
+    session = create_customer_session(order, purpose, store)
+    return DummyRequest(cookies={CUSTOMER_SESSION_COOKIE: session.raw_session_id})
 
 
 class FailingSaveStore(InMemoryOrderStore):
@@ -136,18 +142,19 @@ class Gate4UploadIntakeTests(unittest.TestCase):
         app_module.FirestoreOrderStore = lambda project=None: store
         app_module.Settings.from_env = settings
         try:
-            valid = app_module.upload_form(DummyRequest(token))
-            invalid = app_module.upload_form(DummyRequest("wrong_token_value_that_is_long_enough"))
+            exchange = exchange_customer_token(token, store, derivation_secret=SECRET)
+            valid = app_module.upload_form(DummyRequest(cookies={CUSTOMER_SESSION_COOKIE: exchange.raw_session_id}))
+            invalid = app_module.upload_form(DummyRequest())
             expired_order, expired_token = reissue_token(
                 next(iter(store.orders)), store, derivation_secret=SECRET
             )
             store.save_order(replace(expired_order, token_expires_at=expired_order.token_created_at))
-            expired = app_module.upload_form(DummyRequest(expired_token))
+            expired_exchange = asyncio.run(app_module.session_exchange(JsonRequest({"token": expired_token})))
             revoked_order, revoked_token = reissue_token(
                 next(iter(store.orders)), store, derivation_secret=SECRET
             )
             store.save_order(replace(revoked_order, token_revoked_at=revoked_order.token_created_at))
-            revoked = app_module.upload_form(DummyRequest(revoked_token))
+            revoked_exchange = asyncio.run(app_module.session_exchange(JsonRequest({"token": revoked_token})))
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -156,8 +163,8 @@ class Gate4UploadIntakeTests(unittest.TestCase):
         self.assertIn("Secure Financial Data Upload", valid.body.decode())
         self.assertIn("Business Type", valid.body.decode())
         self.assertEqual(invalid.status_code, 403)
-        self.assertEqual(expired.status_code, 403)
-        self.assertEqual(revoked.status_code, 403)
+        self.assertEqual(expired_exchange.status_code, 403)
+        self.assertEqual(revoked_exchange.status_code, 403)
 
     def test_valid_csv_and_xlsx_current_schema_validate(self) -> None:
         for filename, content in [
@@ -495,7 +502,7 @@ class Gate4UploadIntakeTests(unittest.TestCase):
             )
 
     def test_upload_route_success_logs_no_token_or_financial_values_and_headers_present(self) -> None:
-        store, _, token = paid_order_and_token()
+        store, order, token = paid_order_and_token()
         storage = InMemoryUploadStorage()
         original_store = app_module.FirestoreOrderStore
         original_settings = app_module.Settings.from_env
@@ -508,8 +515,8 @@ class Gate4UploadIntakeTests(unittest.TestCase):
             with self.assertLogs("senalo.fulfilment", level=logging.INFO) as captured:
                 response = asyncio.run(
                     app_module.upload_submit(
-                        DummyRequest(token),
-                        t=token,
+                        session_request(store, order),
+                        t=None,
                         business_type="Food & Beverage",
                         opening_cash="100",
                         financial_file=upload_file,
@@ -533,7 +540,7 @@ class Gate4UploadIntakeTests(unittest.TestCase):
             ("client-storage-private.csv", csv_bytes(valid_dataframe()), InMemoryUploadStorage(fail_save=True)),
         ]:
             with self.subTest(filename=filename):
-                store, _, token = paid_order_and_token()
+                store, order, token = paid_order_and_token()
                 original_store = app_module.FirestoreOrderStore
                 original_settings = app_module.Settings.from_env
                 original_storage = app_module.get_upload_storage
@@ -545,8 +552,8 @@ class Gate4UploadIntakeTests(unittest.TestCase):
                     with self.assertLogs("senalo.fulfilment", level=logging.INFO) as captured:
                         response = asyncio.run(
                             app_module.upload_submit(
-                                DummyRequest(token),
-                                t=token,
+                                session_request(store, order),
+                                t=None,
                                 business_type="Food & Beverage",
                                 opening_cash="123456",
                                 financial_file=upload_file,
@@ -568,8 +575,25 @@ class Gate4UploadIntakeTests(unittest.TestCase):
 
 
 class DummyRequest:
-    def __init__(self, token: str):
-        self.query_params = {"t": token}
+    def __init__(
+        self,
+        token: str | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
+    ):
+        self.query_params = {"t": token} if token else {}
+        self.headers = headers or {}
+        self.cookies = cookies or {}
+
+
+class JsonRequest(DummyRequest):
+    def __init__(self, payload: dict):
+        super().__init__()
+        self.payload = payload
+
+    async def json(self):
+        return self.payload
 
 
 if __name__ == "__main__":

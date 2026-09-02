@@ -134,7 +134,7 @@ def validate_result_token(
 
 
 def build_secure_result_url(base_url: str, raw_token: str) -> str:
-    return f"{base_url.rstrip('/')}/result?t={raw_token}"
+    return f"{base_url.rstrip('/')}/access#{raw_token}"
 
 
 def is_full_analysis_releasable(order: Order) -> bool:
@@ -205,6 +205,41 @@ def load_authorized_artifact(
     derivation_secret: str | None,
 ) -> tuple[Order, bytes, str, str]:
     order = validate_result_token(raw_token, store, derivation_secret=derivation_secret)
+    if not is_result_releasable(order):
+        raise ResultNotReleasableError(RESULT_ACCESS_DENIED)
+    if artifact_type == "pdf":
+        object_path = order.final_pdf_object_path if order.product_code == "EXPERT_REVIEW" else order.pdf_object_path
+        content_type = "application/pdf"
+        filename = "SENALO-Expert-Review.pdf" if order.product_code == "EXPERT_REVIEW" else "SENALO-Full-Analysis.pdf"
+    elif artifact_type == "excel":
+        object_path = order.final_excel_object_path if order.product_code == "EXPERT_REVIEW" else order.excel_object_path
+        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "SENALO-Expert-Review.xlsx" if order.product_code == "EXPERT_REVIEW" else "SENALO-Full-Analysis.xlsx"
+    else:
+        raise ResultNotReleasableError(RESULT_ACCESS_DENIED)
+    try:
+        content = storage.load(str(object_path))
+    except UploadStorageError as exc:
+        raise ResultNotReleasableError(RESULT_OBJECT_MISSING) from exc
+    saved = record_download(order, store)
+    logger.info(
+        "result_artifact_downloaded",
+        extra={
+            "order_id": saved.order_id,
+            "artifact_type": artifact_type,
+            "download_count": saved.download_count,
+        },
+    )
+    return saved, content, content_type, filename
+
+
+def load_authorized_artifact_for_order(
+    *,
+    order: Order,
+    artifact_type: str,
+    store: OrderStore,
+    storage: UploadStorage,
+) -> tuple[Order, bytes, str, str]:
     if not is_result_releasable(order):
         raise ResultNotReleasableError(RESULT_ACCESS_DENIED)
     if artifact_type == "pdf":

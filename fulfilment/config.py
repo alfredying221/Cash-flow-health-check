@@ -37,6 +37,9 @@ class Settings:
     upload_bucket: str | None = None
     max_upload_bytes: int = 5 * 1024 * 1024
     operator_auth_token: str | None = None
+    deployment_role: str = "local"
+    operator_audit_id: str = "operator"
+    customer_session_minutes: int = 45
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -60,6 +63,9 @@ class Settings:
             upload_bucket=os.getenv("SENALO_UPLOAD_BUCKET"),
             max_upload_bytes=int(os.getenv("SENALO_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024))),
             operator_auth_token=os.getenv("SENALO_OPERATOR_AUTH_TOKEN"),
+            deployment_role=os.getenv("SENALO_DEPLOYMENT_ROLE", "local"),
+            operator_audit_id=os.getenv("SENALO_OPERATOR_AUDIT_ID", "operator"),
+            customer_session_minutes=int(os.getenv("SENALO_CUSTOMER_SESSION_MINUTES", "45")),
         )
 
     @property

@@ -8,6 +8,7 @@ from datetime import timedelta
 
 from fulfilment import app as app_module
 from fulfilment.config import Settings
+from fulfilment.customer_sessions import CUSTOMER_SESSION_COOKIE, create_customer_session
 from fulfilment.email_service import RecordingEmailProvider
 from fulfilment.fulfilment_service import OrderFulfilmentService
 from fulfilment.models import utc_now
@@ -43,7 +44,7 @@ def settings() -> Settings:
 
 
 def token_from_message_body(body: str) -> str:
-    match = re.search(r"https://fulfilment\.example\.test/upload\?t=([A-Za-z0-9_-]+)", body)
+    match = re.search(r"https://fulfilment\.example\.test/access#([A-Za-z0-9_-]+)", body)
     if not match:
         raise AssertionError("secure upload token URL was not found")
     return match.group(1)
@@ -108,7 +109,7 @@ class Gate3FulfilmentTests(unittest.TestCase):
         self.assertIn("manual review", message.body)
         self.assertIn("customised commentary", message.body)
         self.assertIn("3–5 prioritised management actions", message.body)
-        self.assertIn("https://fulfilment.example.test/upload?t=", message.body)
+        self.assertIn("https://fulfilment.example.test/access#", message.body)
 
     def test_duplicate_webhook_event_does_not_send_duplicate_email(self) -> None:
         store = InMemoryOrderStore()
@@ -305,7 +306,7 @@ class Gate3FulfilmentTests(unittest.TestCase):
 
     def test_secure_url_contains_token_but_not_order_id(self) -> None:
         url = build_secure_upload_url("https://fulfilment.example.test", "opaque_token")
-        self.assertEqual(url, "https://fulfilment.example.test/upload?t=opaque_token")
+        self.assertEqual(url, "https://fulfilment.example.test/access#opaque_token")
         self.assertNotIn("order_id", url)
 
     def test_raw_token_not_persisted_or_logged(self) -> None:
@@ -410,14 +411,16 @@ class Gate3FulfilmentTests(unittest.TestCase):
             fulfilment_service=service,
         )
         raw_token = token_from_message_body(email_provider.sent[0][0].body)
+        order = next(iter(store.orders.values()))
 
         original_store = app_module.FirestoreOrderStore
         original_settings = app_module.Settings.from_env
         app_module.FirestoreOrderStore = lambda project=None: store
         app_module.Settings.from_env = settings
         try:
-            valid = app_module.upload_form(DummyRequest(raw_token))
-            invalid = app_module.upload_form(DummyRequest("wrong_token_value_that_is_long_enough"))
+            session_result = create_customer_session(order, "upload", store)
+            valid = app_module.upload_form(DummyRequest(cookies={CUSTOMER_SESSION_COOKIE: session_result.raw_session_id}))
+            invalid = app_module.upload_form(DummyRequest())
         finally:
             app_module.FirestoreOrderStore = original_store
             app_module.Settings.from_env = original_settings
@@ -447,8 +450,9 @@ class Gate3FulfilmentTests(unittest.TestCase):
 
 
 class DummyRequest:
-    def __init__(self, token: str):
-        self.query_params = {"t": token}
+    def __init__(self, token: str | None = None, cookies: dict[str, str] | None = None):
+        self.query_params = {"t": token} if token else {}
+        self.cookies = cookies or {}
 
 
 class RecordingThenFailProvider(RecordingEmailProvider):
