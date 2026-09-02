@@ -11,15 +11,9 @@ Thumbs.db
 
 # Local helpers and internal QA datasets
 run_app.ps1
-sample_data.csv
 healthy_business.csv
 watch_business.csv
 at_risk_business.csv
-healthy_food_business.csv
-watch_food_business.csv
-at_risk_food_business.csv
-healthy_market_vendor.csv
-watch_market_vendor.csv
 
 # Generated reports and templates
 cash_flow_summary_*.pdf
