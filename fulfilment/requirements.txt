@@ -5,3 +5,4 @@ google-cloud-storage>=2.18.0
 stripe>=15.0.0
 resend>=2.0.0
 openpyxl>=3.1.5,<4.0.0
+pandas>=3.0.5,<4.0.0
