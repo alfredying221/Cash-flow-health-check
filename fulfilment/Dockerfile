@@ -11,6 +11,7 @@ COPY fulfilment/requirements.txt ./requirements.txt
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY fulfilment ./fulfilment
+COPY senalo_analysis ./senalo_analysis
 
 USER appuser
 
