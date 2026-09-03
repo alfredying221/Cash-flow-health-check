@@ -230,6 +230,8 @@ def build_analysis_artifacts(
             str(order.business_type),
             management_priorities,
             assumptions,
+            forecast,
+            score_breakdown,
         )
     except Exception as exc:
         raise AnalysisProcessingError(PDF_GENERATION_FAILED) from exc
@@ -243,6 +245,8 @@ def build_analysis_artifacts(
             assumptions,
             str(order.business_type),
             scenario_details,
+            metrics,
+            score_label,
         )
     except Exception as exc:
         raise AnalysisProcessingError(EXCEL_GENERATION_FAILED) from exc

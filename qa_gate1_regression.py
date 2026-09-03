@@ -206,9 +206,12 @@ def run() -> None:
             assumptions,
             case["business_type"],
             scenario_details,
+            metrics,
+            label,
         )
         workbook = load_workbook(BytesIO(excel_bytes), read_only=True)
         expected_sheets = [
+            "Summary",
             "Historical Analysis",
             "12-Month Forecast",
             "Scenario Analysis",
@@ -228,8 +231,10 @@ def run() -> None:
             case["business_type"],
             priorities,
             assumptions,
+            forecast,
+            breakdown,
         )
-        for text in [b"Business Financial Health Report", b"Financial Summary", b"Management Priorities"]:
+        for text in [b"SENALO", b"Business Financial Health Report", b"Financial Summary", b"Management Priorities"]:
             if text not in pdf_bytes:
                 raise AssertionError(f"{case['file']} PDF missing {text.decode()}")
 

@@ -11,6 +11,20 @@ from openpyxl.utils import get_column_letter
 from .schema import business_labels, money, occupancy_percent_label, percent, runway_label
 
 
+PERCENT_ASSUMPTIONS = {
+    "Forecast Sales Growth",
+    "Direct Costs %",
+    "Labour Cost Growth",
+    "Occupancy Cost Growth",
+    "Other Operating Costs Growth",
+    "Other Operating Expense Growth",
+    "Downside Sales Adjustment",
+    "Upside Sales Adjustment",
+    "Downside Adjustment",
+    "Upside Adjustment",
+}
+
+
 def format_excel_workbook(writer: pd.ExcelWriter) -> None:
     workbook = writer.book
     header_fill = PatternFill("solid", fgColor="1E3A8A")
@@ -31,10 +45,18 @@ def format_excel_workbook(writer: pd.ExcelWriter) -> None:
         for row in sheet.iter_rows(min_row=2):
             for cell in row:
                 if isinstance(cell.value, (int, float)):
-                    header = sheet.cell(row=1, column=cell.column).value or ""
-                    if "Margin" in header or "Growth" in header or "%" in header or "Buffer" in header or "Adjustment" in header:
+                    header = str(sheet.cell(row=1, column=cell.column).value or "")
+                    row_label = str(sheet.cell(row=cell.row, column=1).value or "")
+                    label_or_header = f"{row_label} {header}"
+                    if sheet.title == "Assumptions" and row_label in PERCENT_ASSUMPTIONS:
                         cell.number_format = "0.0%"
-                    elif "Score" not in header:
+                    elif any(token in label_or_header for token in ["Margin", "Growth", "%", "Buffer", "Adjustment"]):
+                        cell.number_format = "0.0%"
+                    elif "Runway" in label_or_header:
+                        cell.number_format = "0.0"
+                    elif "Score" in label_or_header:
+                        cell.number_format = "0"
+                    else:
                         cell.number_format = "$#,##0"
                 elif sheet.cell(row=1, column=cell.column).value == "Month":
                     cell.number_format = "mmm yyyy"
@@ -83,6 +105,69 @@ def build_scenario_export(
     return pd.DataFrame(rows)
 
 
+def score_label_from_score(score: int) -> str:
+    if score >= 80:
+        return "Healthy"
+    if score >= 60:
+        return "Stable"
+    if score >= 40:
+        return "Watch"
+    return "At Risk"
+
+
+def build_summary_export(
+    history: pd.DataFrame,
+    forecast: pd.DataFrame,
+    scenarios: pd.DataFrame,
+    score_breakdown: pd.DataFrame,
+    business_type: str,
+    metrics: dict[str, float] | None = None,
+    score_label: str | None = None,
+) -> pd.DataFrame:
+    latest = history.iloc[-1]
+    total_sales = float(history["Sales"].sum())
+    total_operating_profit = float(history["Operating Profit"].sum())
+    historical_operating_margin = total_operating_profit / total_sales if total_sales else 0.0
+    total_gross_profit = float(history["Gross Profit"].sum())
+    gross_margin = total_gross_profit / total_sales if total_sales else 0.0
+    latest_sales = float(latest["Sales"])
+    cash_balance = float(latest["Estimated Closing Cash Balance"])
+    break_even_sales = float(latest["Break-even Sales"])
+    break_even_buffer = (latest_sales - break_even_sales) / latest_sales if latest_sales else 0.0
+    score = int(score_breakdown["Score"].sum())
+    label = score_label or score_label_from_score(score)
+    forecast_ending_cash = float(forecast["Estimated Closing Cash Balance"].iloc[-1])
+    base = scenarios.loc[scenarios["Scenario"] == "Base Case"].iloc[0]
+    downside = scenarios.loc[scenarios["Scenario"] == "Downside Case"].iloc[0]
+    upside = scenarios.loc[scenarios["Scenario"] == "Upside Case"].iloc[0]
+
+    if metrics is not None:
+        cash_balance = float(metrics["cash_balance"])
+        gross_margin = float(metrics["gross_margin"])
+        historical_operating_margin = float(metrics["operating_margin"])
+        break_even_sales = float(metrics["break_even_sales"])
+        break_even_buffer = float(metrics["break_even_buffer"])
+
+    rows = [
+        ("Business Type", business_type),
+        ("Financial Health Score", score),
+        ("Health Label", label),
+        ("Historical Sales", total_sales),
+        ("Historical Gross Margin", gross_margin),
+        ("Historical Operating Profit", total_operating_profit),
+        ("Historical Operating Margin", historical_operating_margin),
+        ("Latest Monthly Sales", latest_sales),
+        ("Break-even Sales", break_even_sales),
+        ("Break-even Buffer", break_even_buffer),
+        ("Estimated Cash Balance", cash_balance),
+        ("Base Forecast Ending Cash", forecast_ending_cash),
+        ("Base Case Sales", float(base["Sales"])),
+        ("Downside Case Sales", float(downside["Sales"])),
+        ("Upside Case Sales", float(upside["Sales"])),
+    ]
+    return pd.DataFrame(rows, columns=["Metric", "Value"])
+
+
 def export_excel(
     history: pd.DataFrame,
     forecast: pd.DataFrame,
@@ -91,9 +176,20 @@ def export_excel(
     assumptions: dict[str, float],
     business_type: str,
     scenario_details: dict[str, dict[str, pd.DataFrame | dict[str, float]]],
+    metrics: dict[str, float] | None = None,
+    score_label: str | None = None,
 ) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        build_summary_export(
+            history,
+            forecast,
+            scenarios,
+            score_breakdown,
+            business_type,
+            metrics,
+            score_label,
+        ).to_excel(writer, sheet_name="Summary", index=False)
         prepare_export_dataframe(history, business_type).to_excel(
             writer, sheet_name="Historical Analysis", index=False
         )
@@ -166,21 +262,99 @@ def pdf_rect(
     content.append("Q")
 
 
-def pdf_footer(content: list[str], page_number: int) -> None:
+def pdf_line(
+    content: list[str],
+    points: list[tuple[float, float]],
+    color: tuple[float, float, float] = (0.15, 0.39, 0.92),
+    width: float = 1.8,
+) -> None:
+    if len(points) < 2:
+        return
+    content.append("q")
+    content.append(f"{color[0]:.3f} {color[1]:.3f} {color[2]:.3f} RG")
+    content.append(f"{width:.1f} w")
+    start_x, start_y = points[0]
+    content.append(f"{start_x:.1f} {start_y:.1f} m")
+    for x, y in points[1:]:
+        content.append(f"{x:.1f} {y:.1f} l")
+    content.append("S")
+    content.append("Q")
+
+
+def pdf_cash_balance_chart(
+    content: list[str],
+    forecast: pd.DataFrame | None,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> None:
+    pdf_rect(content, x, y, width, height, fill=(1, 1, 1), stroke=(0.86, 0.89, 0.94))
+    if forecast is None or "Estimated Closing Cash Balance" not in forecast.columns or forecast.empty:
+        pdf_wrapped_text(
+            content,
+            x + 16,
+            y + height - 28,
+            "Monthly estimated cash balance trend is available in the Excel export.",
+            9,
+            width=76,
+            color=(0.28, 0.33, 0.40),
+        )
+        return
+
+    values = [float(value) for value in forecast["Estimated Closing Cash Balance"].head(12)]
+    if not values:
+        return
+    min_value = min(values)
+    max_value = max(values)
+    if min_value == max_value:
+        min_value -= 1
+        max_value += 1
+    left = x + 44
+    bottom = y + 28
+    chart_w = width - 72
+    chart_h = height - 58
+    zero_y = None
+    if min_value < 0 < max_value:
+        zero_y = bottom + (0 - min_value) / (max_value - min_value) * chart_h
+    elif min_value >= 0:
+        zero_y = bottom
+    else:
+        zero_y = bottom + chart_h
+    content.append("0.88 0.91 0.95 RG")
+    content.append(f"0.7 w {left:.1f} {bottom:.1f} m {left + chart_w:.1f} {bottom:.1f} l S")
+    content.append(f"0.7 w {left:.1f} {bottom + chart_h:.1f} m {left + chart_w:.1f} {bottom + chart_h:.1f} l S")
+    content.append(f"0.7 w {left:.1f} {zero_y:.1f} m {left + chart_w:.1f} {zero_y:.1f} l S")
+    points = []
+    denominator = max(len(values) - 1, 1)
+    for idx, value in enumerate(values):
+        px = left + idx / denominator * chart_w
+        py = bottom + (value - min_value) / (max_value - min_value) * chart_h
+        points.append((px, py))
+    pdf_line(content, points)
+    for px, py in points:
+        pdf_rect(content, px - 1.8, py - 1.8, 3.6, 3.6, fill=(0.15, 0.39, 0.92), stroke=None)
+    pdf_text(content, x + 12, bottom + chart_h - 4, money(max_value), 8, color=(0.28, 0.33, 0.40))
+    pdf_text(content, x + 12, bottom - 2, money(min_value), 8, color=(0.28, 0.33, 0.40))
+    pdf_text(content, left, y + 10, "Month 1", 8, color=(0.28, 0.33, 0.40))
+    pdf_text(content, left + chart_w - 36, y + 10, "Month 12", 8, color=(0.28, 0.33, 0.40))
+
+
+def pdf_footer(content: list[str], page_number: int, total_pages: int) -> None:
     content.append("0.82 0.86 0.91 RG")
     content.append("54 44 504 0 m S")
     pdf_text(
         content,
         72,
         26,
-        f"Business Financial Health Check | Page {page_number} of 3",
+        f"Business Financial Health Check | Page {page_number} of {total_pages}",
         9,
         color=(0.28, 0.33, 0.40),
     )
 
 
-def pdf_page_stream(content: list[str], page_number: int) -> bytes:
-    pdf_footer(content, page_number)
+def pdf_page_stream(content: list[str], page_number: int, total_pages: int) -> bytes:
+    pdf_footer(content, page_number, total_pages)
     return "\n".join(content).encode("latin-1", errors="replace")
 
 
@@ -194,14 +368,17 @@ def build_report_pdf(
     business_type: str,
     management_priorities: list[str],
     assumptions: dict[str, float | str],
+    forecast: pd.DataFrame | None = None,
+    score_breakdown: pd.DataFrame | None = None,
 ) -> bytes:
     generated_date = datetime.now().strftime("%Y-%m-%d")
     pages: list[list[str]] = []
 
     page1: list[str] = []
-    pdf_text(page1, 54, 742, "Business Financial Health Report", 20)
-    pdf_text(page1, 54, 718, "Financial Health and 12-Month Scenario Analysis", 12, color=(0.28, 0.33, 0.40))
-    pdf_text(page1, 54, 698, f"Report generated: {generated_date}", 9, color=(0.35, 0.39, 0.46))
+    pdf_text(page1, 54, 760, "SENALO", 16, color=(0.12, 0.23, 0.47))
+    pdf_text(page1, 54, 736, "Business Financial Health Report", 20)
+    pdf_text(page1, 54, 712, "Financial Health and 12-Month Scenario Analysis", 12, color=(0.28, 0.33, 0.40))
+    pdf_text(page1, 54, 692, f"Report generated: {generated_date}", 9, color=(0.35, 0.39, 0.46))
     pdf_rect(page1, 54, 592, 504, 78, fill=(0.94, 0.97, 1.0))
     pdf_text(page1, 76, 640, "Financial Health Score", 11, color=(0.23, 0.28, 0.34))
     pdf_text(page1, 76, 610, f"{score}/100", 24)
@@ -251,7 +428,8 @@ def build_report_pdf(
     pages.append(page1)
 
     page2: list[str] = []
-    pdf_text(page2, 54, 742, "12-Month Forecast and Scenario Analysis", 17)
+    pdf_text(page2, 54, 760, "SENALO", 12, color=(0.12, 0.23, 0.47))
+    pdf_text(page2, 54, 738, "12-Month Forecast and Scenario Analysis", 17)
     pdf_rect(page2, 54, 666, 504, 34, fill=(0.12, 0.23, 0.47), stroke=None)
     headers = ["Scenario", "Sales", "Operating Profit", "Estimated Ending Cash", "Cash Runway"]
     cols = [66, 162, 258, 370, 474]
@@ -279,72 +457,81 @@ def build_report_pdf(
         pdf_rect(page2, chart_x, y_bar, width, bar_h, fill=fill, stroke=None)
         pdf_text(page2, chart_x + chart_w + 12, y_bar + 6, money(cash_value), 9)
     pdf_text(page2, 54, 250, "12-Month Estimated Cash Balance Trend", 13)
-    pdf_wrapped_text(
-        page2,
-        54,
-        226,
-        f"The base forecast ends with estimated cash of {money(forecast_metrics['cash_balance'])}. Detailed monthly forecast values are available in the Excel export and in the application dashboard.",
-        10,
-        width=100,
-        color=(0.23, 0.28, 0.34),
-    )
+    pdf_cash_balance_chart(page2, forecast, 54, 82, 504, 150)
+    pdf_text(page2, 72, 62, f"Base forecast ending cash: {money(forecast_metrics['cash_balance'])}", 9)
     pages.append(page2)
 
     risk_lines = [line for line in summary_lines if line.startswith("Primary risk:")]
     action_lines = [line for line in summary_lines if line.startswith("Recommended action:")]
     key_lines = [line for line in summary_lines if line not in risk_lines + action_lines]
     page3: list[str] = []
-    pdf_text(page3, 54, 742, "Financial Summary", 17)
-    pdf_text(page3, 54, 706, "Key Findings", 13)
-    y = 682
-    for line in key_lines[:5]:
+    pdf_text(page3, 54, 760, "SENALO", 12, color=(0.12, 0.23, 0.47))
+    pdf_text(page3, 54, 738, "Financial Summary", 17)
+    pdf_text(page3, 54, 704, "Financial Health Score Breakdown", 13)
+    pdf_rect(page3, 54, 666, 504, 26, fill=(0.12, 0.23, 0.47), stroke=None)
+    breakdown_cols = [66, 232, 286, 350]
+    for x, header in zip(breakdown_cols, ["Factor", "Score", "Max", "Reason"]):
+        pdf_text(page3, x, 676, header, 8, color=(1, 1, 1))
+    y = 642
+    if score_breakdown is not None:
+        for _, row in score_breakdown.iterrows():
+            pdf_rect(page3, 54, y - 8, 504, 28, fill=(1, 1, 1), stroke=(0.90, 0.92, 0.95))
+            pdf_text(page3, breakdown_cols[0], y + 4, str(row.get("Factor", ""))[:28], 8)
+            pdf_text(page3, breakdown_cols[1], y + 4, str(int(row.get("Score", 0))), 8)
+            pdf_text(page3, breakdown_cols[2], y + 4, str(int(row.get("Maximum Score", 0))), 8)
+            pdf_wrapped_text(page3, breakdown_cols[3], y + 4, str(row.get("Reason", "")), 7, width=42, line_height=8)
+            y -= 34
+    pdf_text(page3, 54, y - 6, f"Total score: {score}/100", 10)
+    pdf_text(page3, 54, y - 40, "Key Findings", 13)
+    y -= 64
+    for line in key_lines[:4]:
         y = pdf_wrapped_text(page3, 70, y, f"- {line}", 10, width=92)
         y -= 6
-    pdf_text(page3, 54, 390, "Primary Financial Risk", 13)
-    pdf_rect(page3, 54, 304, 504, 68, fill=(1.0, 0.95, 0.95), stroke=(0.95, 0.65, 0.65))
+    pdf_text(page3, 54, 268, "Primary Financial Risk", 13)
+    pdf_rect(page3, 54, 196, 504, 54, fill=(1.0, 0.95, 0.95), stroke=(0.95, 0.65, 0.65))
     risk_text = risk_lines[0].replace("Primary risk: ", "") if risk_lines else "No primary risk identified."
-    pdf_wrapped_text(page3, 76, 346, risk_text, 10, width=92)
-    pdf_text(page3, 54, 260, "Management Priorities", 13)
-    action_text = (
-        action_lines[0].replace("Recommended action: ", "")
-        if action_lines
-        else "Review the dashboard indicators and scenario results before making management decisions."
-    )
-    y_actions = 236
+    pdf_wrapped_text(page3, 76, 232, risk_text, 10, width=92)
+    pdf_text(page3, 54, 170, "Management Priorities", 13)
+    y_actions = 148
     for index, priority in enumerate(management_priorities[:3], start=1):
         y_actions = pdf_wrapped_text(page3, 70, y_actions, f"{index}. {priority}", 10, width=92)
         y_actions -= 4
-    pdf_text(page3, 54, 158, "Assumptions", 11, color=(0.23, 0.28, 0.34))
-    pdf_text(
-        page3,
-        70,
-        140,
-        f"Business Type: {assumptions.get('Business Type', business_type)}",
-        8,
-        color=(0.28, 0.33, 0.40),
-    )
-    pdf_text(
-        page3,
-        70,
-        128,
-        f"Base sales growth: {percent(float(assumptions.get('Forecast Sales Growth', 0.0)))}; Direct cost %: {percent(float(assumptions.get('Direct Costs %', 0.0)))}",
-        8,
-        color=(0.28, 0.33, 0.40),
-    )
-    pdf_text(page3, 54, 118, "Limitations and Disclaimer", 11, color=(0.23, 0.28, 0.34))
-    pdf_wrapped_text(
-        page3,
-        54,
-        100,
-        "This tool provides an indicative financial analysis based on information supplied by the user. It is not accounting, tax, audit, investment, or financial advice. Results should be reviewed alongside actual cash-flow records and professional advice where appropriate.",
-        8,
-        width=112,
-        line_height=10,
-        color=(0.28, 0.33, 0.40),
-    )
     pages.append(page3)
 
-    streams = [pdf_page_stream(page, index) for index, page in enumerate(pages, start=1)]
+    page4: list[str] = []
+    pdf_text(page4, 54, 760, "SENALO", 12, color=(0.12, 0.23, 0.47))
+    pdf_text(page4, 54, 738, "Report Notes", 17)
+    pdf_text(page4, 54, 700, "Assumptions", 13, color=(0.23, 0.28, 0.34))
+    pdf_text(
+        page4,
+        70,
+        674,
+        f"Business Type: {assumptions.get('Business Type', business_type)}",
+        10,
+        color=(0.28, 0.33, 0.40),
+    )
+    pdf_text(
+        page4,
+        70,
+        654,
+        f"Base sales growth: {percent(float(assumptions.get('Forecast Sales Growth', 0.0)))}; Direct cost %: {percent(float(assumptions.get('Direct Costs %', 0.0)))}",
+        10,
+        color=(0.28, 0.33, 0.40),
+    )
+    pdf_text(page4, 54, 606, "Limitations and Disclaimer", 13, color=(0.23, 0.28, 0.34))
+    pdf_wrapped_text(
+        page4,
+        54,
+        580,
+        "This tool provides an indicative financial analysis based on information supplied by the user. It is not accounting, tax, audit, investment, or financial advice. Results should be reviewed alongside actual cash-flow records and professional advice where appropriate.",
+        10,
+        width=96,
+        line_height=13,
+        color=(0.28, 0.33, 0.40),
+    )
+    pages.append(page4)
+
+    streams = [pdf_page_stream(page, index, len(pages)) for index, page in enumerate(pages, start=1)]
     page_objects = []
     content_object_start = 3 + len(streams) + 1
     for idx, _ in enumerate(streams, start=1):

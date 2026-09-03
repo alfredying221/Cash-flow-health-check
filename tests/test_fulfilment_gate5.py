@@ -168,7 +168,7 @@ class Gate5AnalysisProcessingTests(unittest.TestCase):
         workbook = openpyxl.load_workbook(filename=io.BytesIO(storage.objects[excel_path]), read_only=True)
         self.assertEqual(
             set(workbook.sheetnames),
-            {"Historical Analysis", "12-Month Forecast", "Scenario Analysis", "Health Score", "Assumptions"},
+            {"Summary", "Historical Analysis", "12-Month Forecast", "Scenario Analysis", "Health Score", "Assumptions"},
         )
         workbook.close()
 

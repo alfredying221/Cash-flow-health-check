@@ -368,7 +368,7 @@ def make_cfo_summary(
     elif exp_growth > rev_growth:
         risk = "Primary risk: operating expenses are growing faster than sales, weakening operating leverage."
     else:
-        risk = "Primary risk: preserving margin quality and downside resilience as the business grows."
+        risk = "Primary risk: margin quality and downside resilience could weaken as the business grows."
 
     if score_label == "Healthy":
         action = "Recommended action: preserve operating leverage, maintain margin discipline, and deploy surplus cash carefully."
