@@ -49,6 +49,36 @@ class Gate6ResultDeliveryTests(unittest.TestCase):
         token = provider.sent[0][0].body.split("/access#", 1)[1].splitlines()[0] if provider.sent else None
         return sent, token, provider
 
+    def test_validated_upload_background_processing_reaches_ready_and_sends_result_once(self) -> None:
+        store, storage, order = create_validated_order()
+        provider = RecordingEmailProvider()
+        original_store = app_module.FirestoreOrderStore
+        original_settings = app_module.Settings.from_env
+        original_storage = app_module.get_upload_storage
+        original_email_provider = app_module.get_email_provider
+        app_module.FirestoreOrderStore = lambda project=None: store
+        app_module.Settings.from_env = settings
+        app_module.get_upload_storage = lambda settings: storage
+        app_module.get_email_provider = lambda settings: provider
+        try:
+            app_module.process_validated_upload_background(order.order_id)
+            app_module.process_validated_upload_background(order.order_id)
+        finally:
+            app_module.FirestoreOrderStore = original_store
+            app_module.Settings.from_env = original_settings
+            app_module.get_upload_storage = original_storage
+            app_module.get_email_provider = original_email_provider
+
+        saved = store.get_order(order.order_id)
+        self.assertEqual(saved.fulfilment_status, "READY")
+        self.assertEqual(saved.analysis_status, "COMPLETED")
+        self.assertEqual(saved.result_status, "READY")
+        self.assertTrue(saved.pdf_object_path)
+        self.assertTrue(saved.excel_object_path)
+        self.assertTrue(saved.result_token_hash)
+        self.assertEqual(saved.result_email_status, "SENT")
+        self.assertEqual(len(provider.sent), 1)
+
     def test_full_analysis_result_page_access_and_safe_headers(self) -> None:
         store, storage, order = self.ready_order()
         _, result_token, _ = self.send_result_email(store, order)

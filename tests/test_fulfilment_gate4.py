@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 
 import pandas as pd
+from fastapi import BackgroundTasks
 from openpyxl import Workbook
 from starlette.datastructures import UploadFile
 
@@ -511,11 +512,13 @@ class Gate4UploadIntakeTests(unittest.TestCase):
         app_module.Settings.from_env = settings
         app_module.get_upload_storage = lambda settings: storage
         upload_file = UploadFile(file=io.BytesIO(csv_bytes(valid_dataframe())), filename="client-private.csv")
+        background_tasks = BackgroundTasks()
         try:
             with self.assertLogs("senalo.fulfilment", level=logging.INFO) as captured:
                 response = asyncio.run(
                     app_module.upload_submit(
                         session_request(store, order),
+                        background_tasks,
                         t=None,
                         business_type="Food & Beverage",
                         opening_cash="100",
@@ -533,6 +536,7 @@ class Gate4UploadIntakeTests(unittest.TestCase):
         self.assertNotIn(token, logs)
         self.assertNotIn("10000", logs)
         self.assertNotIn("client-private", logs)
+        self.assertEqual(len(background_tasks.tasks), 1)
 
     def test_upload_route_failure_logs_no_sensitive_upload_data(self) -> None:
         for filename, content, storage in [
@@ -553,6 +557,7 @@ class Gate4UploadIntakeTests(unittest.TestCase):
                         response = asyncio.run(
                             app_module.upload_submit(
                                 session_request(store, order),
+                                BackgroundTasks(),
                                 t=None,
                                 business_type="Food & Beverage",
                                 opening_cash="123456",

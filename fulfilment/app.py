@@ -5,9 +5,10 @@ import secrets
 import time
 from html import escape
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .analysis_processor import process_order_analysis
 from .config import Settings
 from .customer_sessions import (
     CUSTOMER_SESSION_COOKIE,
@@ -31,6 +32,7 @@ from .operator_review import (
     save_review_draft,
 )
 from .result_delivery import (
+    ResultDeliveryService,
     ResultNotReleasableError,
     ResultTokenExpiredError,
     is_expert_review_blocked,
@@ -83,6 +85,56 @@ def get_upload_storage(settings: Settings):
     if settings.upload_bucket:
         return GoogleCloudUploadStorage(settings.upload_bucket, project=settings.google_cloud_project)
     return LOCAL_UPLOAD_STORAGE
+
+
+def get_email_provider(settings: Settings):
+    if settings.resend_api_key and settings.senalo_email_from:
+        return ResendEmailProvider(
+            settings.resend_api_key,
+            settings.senalo_email_from,
+            settings.senalo_email_reply_to,
+        )
+    return UnconfiguredEmailProvider()
+
+
+def process_validated_upload_background(order_id: str) -> None:
+    started = time.perf_counter()
+    settings = Settings.from_env()
+    store = FirestoreOrderStore(project=settings.google_cloud_project)
+    storage = get_upload_storage(settings)
+    try:
+        processed = process_order_analysis(order_id=order_id, store=store, storage=storage)
+        if processed.status != "READY":
+            logger.warning(
+                "analysis_not_ready_after_upload",
+                extra={
+                    "order_id": order_id,
+                    "processing_outcome": processed.status,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                },
+            )
+            return
+
+        delivery = ResultDeliveryService(store, settings, get_email_provider(settings))
+        delivered = delivery.send_result_ready_email(order_id)
+        logger.info(
+            "post_upload_processing_completed",
+            extra={
+                "order_id": order_id,
+                "processing_outcome": processed.status,
+                "result_status": delivered.result_status,
+                "result_email_status": delivered.result_email_status,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "post_upload_processing_failed",
+            extra={
+                "order_id": order_id,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        )
 
 
 def secure_html_response(body: str, status_code: int = 200) -> HTMLResponse:
@@ -377,6 +429,7 @@ def download_artifact(request: Request, artifact_type: str) -> Response:
 @app.post("/upload")
 async def upload_submit(
     request: Request,
+    background_tasks: BackgroundTasks,
     t: str | None = Form(None),
     business_type: str = Form(...),
     opening_cash: str = Form(...),
@@ -428,6 +481,7 @@ async def upload_submit(
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         },
     )
+    background_tasks.add_task(process_validated_upload_background, result.order.order_id)
     return secure_html_response(
         render_page(
             "<p>Your financial data has been received successfully.</p>"
@@ -681,14 +735,7 @@ async def stripe_webhook_endpoint(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid Stripe signature") from exc
 
     store = FirestoreOrderStore(project=settings.google_cloud_project)
-    if settings.resend_api_key and settings.senalo_email_from:
-        email_provider = ResendEmailProvider(
-            settings.resend_api_key,
-            settings.senalo_email_from,
-            settings.senalo_email_reply_to,
-        )
-    else:
-        email_provider = UnconfiguredEmailProvider()
+    email_provider = get_email_provider(settings)
     fulfilment_service = OrderFulfilmentService(store, settings, email_provider)
     event_id = str(event.get("id") or "")
     event_type = str(event.get("type") or "")
