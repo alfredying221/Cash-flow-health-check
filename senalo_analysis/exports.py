@@ -48,7 +48,9 @@ def format_excel_workbook(writer: pd.ExcelWriter) -> None:
                     header = str(sheet.cell(row=1, column=cell.column).value or "")
                     row_label = str(sheet.cell(row=cell.row, column=1).value or "")
                     label_or_header = f"{row_label} {header}"
-                    if sheet.title == "Assumptions" and row_label in PERCENT_ASSUMPTIONS:
+                    if sheet.title == "Health Score" and header in {"Score", "Maximum Score"}:
+                        cell.number_format = "0"
+                    elif sheet.title == "Assumptions" and row_label in PERCENT_ASSUMPTIONS:
                         cell.number_format = "0.0%"
                     elif any(token in label_or_header for token in ["Margin", "Growth", "%", "Buffer", "Adjustment"]):
                         cell.number_format = "0.0%"
@@ -375,10 +377,10 @@ def build_report_pdf(
     pages: list[list[str]] = []
 
     page1: list[str] = []
-    pdf_text(page1, 54, 760, "SENALO", 16, color=(0.12, 0.23, 0.47))
-    pdf_text(page1, 54, 736, "Business Financial Health Report", 20)
-    pdf_text(page1, 54, 712, "Financial Health and 12-Month Scenario Analysis", 12, color=(0.28, 0.33, 0.40))
-    pdf_text(page1, 54, 692, f"Report generated: {generated_date}", 9, color=(0.35, 0.39, 0.46))
+    pdf_text(page1, 54, 760, "SENALO", 22, color=(0.12, 0.23, 0.47))
+    pdf_text(page1, 54, 724, "Business Financial Health Report", 20)
+    pdf_text(page1, 54, 700, "Financial Health and 12-Month Scenario Analysis", 12, color=(0.28, 0.33, 0.40))
+    pdf_text(page1, 54, 680, f"Report generated: {generated_date}", 9, color=(0.35, 0.39, 0.46))
     pdf_rect(page1, 54, 592, 504, 78, fill=(0.94, 0.97, 1.0))
     pdf_text(page1, 76, 640, "Financial Health Score", 11, color=(0.23, 0.28, 0.34))
     pdf_text(page1, 76, 610, f"{score}/100", 24)
