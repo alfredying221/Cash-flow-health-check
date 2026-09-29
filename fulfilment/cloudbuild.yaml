@@ -1,0 +1,71 @@
+# Canonical fulfilment build. Submit from the repository root:
+# gcloud builds submit --project=senalo-production --config=fulfilment/cloudbuild.yaml .
+# Builds and pushes only; Cloud Run deployment is a separate approved operation.
+# Periodically review the pinned worker release for deprecation or retirement.
+options:
+  workerRelease: "2026.09"
+
+steps:
+  - id: docker-version
+    name: gcr.io/cloud-builders/docker
+    args: [version]
+
+  - id: regression
+    name: python:3.12-slim
+    entrypoint: sh
+    args:
+      - -ec
+      - |
+        python -m pip install -r fulfilment/requirements.txt
+        python qa_gate1_regression.py
+        python -m unittest discover -s tests -t .
+        python -m compileall -q app.py fulfilment senalo_analysis tests
+
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - fulfilment/Dockerfile
+      - -t
+      - australia-southeast1-docker.pkg.dev/senalo-production/senalo/senalo-fulfilment:build-$BUILD_ID
+      - .
+
+  - id: startup-smoke
+    name: gcr.io/cloud-builders/docker
+    args:
+      - run
+      - --rm
+      - australia-southeast1-docker.pkg.dev/senalo-production/senalo/senalo-fulfilment:build-$BUILD_ID
+      - python
+      - -c
+      - |
+        import pandas, openpyxl, multipart, senalo_analysis
+        import fulfilment.app, fulfilment.operator_review
+        import subprocess, time, urllib.request
+
+        process = subprocess.Popen([
+            'uvicorn', 'fulfilment.app:app',
+            '--host', '127.0.0.1', '--port', '8080',
+        ])
+        try:
+            for attempt in range(30):
+                if process.poll() is not None:
+                    raise RuntimeError('Application exited during startup')
+                try:
+                    response = urllib.request.urlopen(
+                        'http://127.0.0.1:8080/health', timeout=2,
+                    )
+                    assert response.status == 200
+                    print('CONTAINER_IMPORT_STARTUP_HEALTH_PASS')
+                    break
+                except OSError:
+                    time.sleep(1)
+            else:
+                raise RuntimeError('Application health check timed out')
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
+
+images:
+  - australia-southeast1-docker.pkg.dev/senalo-production/senalo/senalo-fulfilment:build-$BUILD_ID
