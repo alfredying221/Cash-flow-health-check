@@ -9,6 +9,19 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Local secrets and private credentials (at any directory depth)
+.env
+.env.*
+*service-account*.json
+*service_account*.json
+*serviceAccount*.json
+*credentials*.json
+*.pem
+*.key
+*.p12
+*.pfx
+!fulfilment/env.example
+
 # Local helpers and internal QA datasets
 run_app.ps1
 healthy_business.csv
